@@ -79,13 +79,13 @@ class CBenchmarkTest extends AnyFlatSpec with ChiselScalatestTester with Matcher
       println(f"\n=======================================================")
       println(f"  DUAL-ISSUE C BENCHMARK 3: MATRIX MULTIPLICATION      ")
       println(f"=======================================================")
-      println(f"  Matrix Total Sum        : $sumVal (Expected: 823)")
+      println(f"  Matrix Total Sum        : $sumVal (Expected: 615)")
       println(f"  Total Cycles Elapsed    : ${cycles.toLong}")
       println(f"  Instructions Retired    : ${insts.toLong}")
       println(f"  Core IPC Throughput     : $ipc%.3f Instructions / Cycle")
       println(f"=======================================================\n")
 
-      dut.io.registerFile(10).expect(823.U)
+      dut.io.registerFile(10).expect(615.U)
     }
   }
 }

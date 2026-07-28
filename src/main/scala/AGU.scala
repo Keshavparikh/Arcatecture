@@ -9,6 +9,8 @@ import chisel3.util._
   * Features:
   * - 64-bit Dual Instruction Fetch Input (imemData64) receiving inst0 and inst1.
   * - Dual Instruction Decoding & Structural / Hazard Detection.
+  * - Bank Collision Pre-Filtering: Prevents dual dispatch when both instructions target the same register bank (even/odd).
+  * - Control Flow Enforcement: Branch and jump instructions issue in Lane 0 for deterministic target resolution.
   * - Integrated 16-Entry Direct-Mapped 2-Bit Saturating Counter BTB Branch Predictor.
   * - Zero-latency Branch Target Prediction and Speculative PC Increment (+4 or +8).
   * - Pipeline Stall on memory/system fence operations and non-speculative trap halt.
@@ -214,17 +216,22 @@ class AGU extends Module {
 
   val isWarHazardBetweenDualInsts = rd1 =/= 0.U && (rs10 === rd1 || rs20 === rd1)
 
-  val isSameQueueHazard = (isMType0 && isMType1) ||
-                          (isMemLane0 && isMemLane1) ||
-                          (isFastLane0 && isFastLane1)
+  // Structural Bank Write Collision: Both instructions writing to the same register bank (even/odd)
+  val isBankCollision = rd0 =/= 0.U && rd1 =/= 0.U && (rd0(0) === rd1(0))
 
-  val isControlFlowInInst0 = isBType0 || isJType0 || isJalr0 || isFence0 || isFence1
+  val isSameQueueHazard = (isMType0 && isMType1) ||
+                          (isMemLane0 && isMemLane1)
+
+  // Control Flow Enforcement: Branch and jump instructions issue in Lane 0
+  val isControlFlowInDualInsts = isBType0 || isJType0 || isJalr0 || isFence0 ||
+                                isBType1 || isJType1 || isJalr1 || isFence1
 
   val canDualIssue = !isRawHazardBetweenDualInsts &&
                      !isWawHazardBetweenDualInsts &&
                      !isWarHazardBetweenDualInsts &&
+                     !isBankCollision             &&
                      !isSameQueueHazard           &&
-                     !isControlFlowInInst0
+                     !isControlFlowInDualInsts
 
   val stall = io.fenceStall || io.trapHaltIn
 
@@ -245,13 +252,7 @@ class AGU extends Module {
   }.elsewhen(isJType0) {
     pcNext := pc + jImm0
   }.elsewhen(canDualIssue && io.out0.ready && io.out1.ready) {
-    when(isBType1) {
-      pcNext := pc + 8.U
-    }.elsewhen(isJType1) {
-      pcNext := (pc + 4.U) + jImm1
-    }.otherwise {
-      pcNext := pc + 8.U
-    }
+    pcNext := pc + 8.U
   }.elsewhen(io.out0.ready) {
     pcNext := pc + 4.U
   }

@@ -6,8 +6,8 @@ import chisel3.util._
 /**
   * LightningRV Top-Level SoC Module
   * 
-  * Integrates Dual-Issue AGU with 16-entry 2-bit BTB, ComputeUnit with Scoreboard RAW/WAW/WAR hazard
-  * interlocks, and 16KB Scratchpad SRAM Memory Array over a 64-bit instruction fetch bus.
+  * Integrates Dual-Issue AGU with 16-entry 2-bit BTB, ComputeUnit with Banked Register File & Parallel
+  * Dual-ALU Execution Engine, and 16KB Scratchpad SRAM Memory Array over a 64-bit instruction fetch bus.
   */
 class LightningRV(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) extends Module {
   val io = IO(new Bundle {
@@ -63,7 +63,7 @@ class LightningRV(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) e
 
   when(!computeUnit.io.trapHalt) {
     cycleReg := cycleReg + 1.U
-    val retiredCount = Mux(computeUnit.io.wbValid, Mux(computeUnit.io.in0.fire && computeUnit.io.in1.fire, 2.U, 1.U), 0.U)
+    val retiredCount = Mux(computeUnit.io.in0.fire && computeUnit.io.in1.fire, 2.U, Mux(computeUnit.io.in0.fire || computeUnit.io.wbValid, 1.U, 0.U))
     instReg := instReg + retiredCount
   }
 

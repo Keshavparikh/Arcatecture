@@ -8,6 +8,7 @@ LightningRV.v
 riscv-gcc.tar.gz
 sbt-1.9.8.tgz
 xpack-riscv-none-elf-gcc-13.2.0-2/
+benchmarks/matrix_native
 .DS_Store
 .bsp/
 .idea/
