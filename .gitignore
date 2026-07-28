@@ -1,0 +1,14 @@
+target/
+project/target/
+project/project/
+test_run_dir/
+LightningRV.anno.json
+LightningRV.fir
+LightningRV.v
+riscv-gcc.tar.gz
+sbt-1.9.8.tgz
+xpack-riscv-none-elf-gcc-13.2.0-2/
+.DS_Store
+.bsp/
+.idea/
+.vscode/
