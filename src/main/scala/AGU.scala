@@ -4,22 +4,13 @@ import chisel3._
 import chisel3.util._
 
 /**
-  * AGU (Address Generation Unit / Dual-Issue Decoder & BTB Predictor with Keshav-ISA Extensions)
-  * 
-  * Features:
-  * - 64-bit Dual Instruction Fetch Input (imemData64) receiving inst0 and inst1.
-  * - Keshav-ISA Custom Decoder (opcode 0b0001011): Fused Shift-Add (SADD), Hardware Min (MIN), Hardware Max (MAX).
-  * - Bank Collision Pre-Filtering: Prevents dual dispatch when both instructions target the same register bank (even/odd).
-  * - Control Flow Enforcement: Branch and jump instructions issue in Lane 0 for deterministic target resolution.
-  * - Integrated 16-Entry Direct-Mapped 2-Bit Saturating Counter BTB Branch Predictor.
-  * - Zero-latency Branch Target Prediction and Speculative PC Increment (+4 or +8).
-  * - Pipeline Stall on memory/system fence operations and non-speculative trap halt.
+  * AGU (Address Generation Unit / Dual-Issue Decoder & BTB Predictor with 64-Bit RV64IM & Keshav-ISA Extensions)
   */
 class AGU extends Module {
   val io = IO(new Bundle {
-    // 64-bit Instruction Memory Input from Scratchpad
+    // 64-bit Dual Instruction Fetch Input from Scratchpad
     val imemData64 = Input(UInt(64.W))
-    val pc         = Output(UInt(32.W))
+    val pc         = Output(UInt(64.W))
 
     // Dual Decoupled Output Interfaces to ComputeUnit
     val out0 = Decoupled(new ExecuteCommand)
@@ -31,18 +22,18 @@ class AGU extends Module {
 
     // BTB Branch Redirection & Training Input from ComputeUnit
     val branchRedirect  = Input(Bool())
-    val branchTarget    = Input(UInt(32.W))
+    val branchTarget    = Input(UInt(64.W))
     val btbUpdateValid  = Input(Bool())
-    val btbUpdatePC     = Input(UInt(32.W))
-    val btbUpdateTarget = Input(UInt(32.W))
+    val btbUpdatePC     = Input(UInt(64.W))
+    val btbUpdateTarget = Input(UInt(64.W))
     val btbUpdateTaken  = Input(Bool())
 
     // Trap / Halt Output Signal (asserts on ecall)
     val trapHalt = Output(Bool())
   })
 
-  // Program Counter Register (32-Bit)
-  val pc = RegInit(0.U(32.W))
+  // Program Counter Register (64-Bit)
+  val pc = RegInit(0.U(64.W))
   io.pc := pc
 
   // Instantiate 16-Entry 2-Bit BTB Branch Predictor
@@ -50,8 +41,8 @@ class AGU extends Module {
 
   // Connect BTB Training Interface from ComputeUnit
   btb.io.updateValid  := io.btbUpdateValid
-  btb.io.updatePC     := io.btbUpdatePC
-  btb.io.updateTarget := io.btbUpdateTarget
+  btb.io.updatePC     := io.btbUpdatePC(31, 0)
+  btb.io.updateTarget := io.btbUpdateTarget(31, 0)
   btb.io.updateTaken  := io.btbUpdateTaken
 
   // Split 64-bit Instruction Word into 32-bit inst0 and inst1
@@ -73,7 +64,8 @@ class AGU extends Module {
   val funct71 = inst1(31, 25)
 
   val isRType0     = opcode0 === "b0110011".U
-  val isIType0     = opcode0 === "b0010011".U || opcode0 === "b0000011".U
+  val isRTypeW0    = opcode0 === "b0111011".U // RV64 Word Operations
+  val isIType0     = opcode0 === "b0010011".U || opcode0 === "b0000011".U || opcode0 === "b0011011".U
   val isSType0     = opcode0 === "b0100011".U
   val isBType0     = opcode0 === "b1100011".U
   val isUType0     = opcode0 === "b0110111".U
@@ -83,17 +75,18 @@ class AGU extends Module {
   val isKeshavIsa0 = opcode0 === "b0001011".U // CUSTOM_0 Opcode for Keshav-ISA
 
   val isRType1     = opcode1 === "b0110011".U
-  val isIType1     = opcode1 === "b0010011".U || opcode1 === "b0000011".U
+  val isRTypeW1    = opcode1 === "b0111011".U
+  val isIType1     = opcode1 === "b0010011".U || opcode1 === "b0000011".U || opcode1 === "b0011011".U
   val isSType1     = opcode1 === "b0100011".U
   val isBType1     = opcode1 === "b1100011".U
   val isUType1     = opcode1 === "b0110111".U
   val isJType1     = opcode1 === "b1101111".U
   val isJalr1      = opcode1 === "b1100111".U
   val isFence1     = opcode1 === "b0001111".U || opcode1 === "b1110011".U
-  val isKeshavIsa1 = opcode1 === "b0001011".U // CUSTOM_0 Opcode for Keshav-ISA
+  val isKeshavIsa1 = opcode1 === "b0001011".U
 
-  val isMType0 = isRType0 && funct70 === "b0000001".U
-  val isMType1 = isRType1 && funct71 === "b0000001".U
+  val isMType0 = (isRType0 || isRTypeW0) && funct70 === "b0000001".U
+  val isMType1 = (isRType1 || isRTypeW1) && funct71 === "b0000001".U
 
   val isMemLane0 = opcode0 === "b0000011".U || opcode0 === "b0100011".U
   val isMemLane1 = opcode1 === "b0000011".U || opcode1 === "b0100011".U
@@ -101,20 +94,20 @@ class AGU extends Module {
   val isFastLane0 = !isMType0 && !isMemLane0
   val isFastLane1 = !isMType1 && !isMemLane1
 
-  val iImm0 = Cat(Fill(20, inst0(31)), inst0(31, 20))
-  val sImm0 = Cat(Fill(20, inst0(31)), inst0(31, 25), inst0(11, 7))
-  val bImm0 = Cat(Fill(20, inst0(31)), inst0(7), inst0(30, 25), inst0(11, 8), 0.U(1.W))
-  val uImm0 = Cat(inst0(31, 12), 0.U(12.W))
-  val jImm0 = Cat(Fill(12, inst0(31)), inst0(19, 12), inst0(20), inst0(30, 21), 0.U(1.W))
+  val iImm0 = Cat(Fill(52, inst0(31)), inst0(31, 20))
+  val sImm0 = Cat(Fill(52, inst0(31)), inst0(31, 25), inst0(11, 7))
+  val bImm0 = Cat(Fill(52, inst0(31)), inst0(7), inst0(30, 25), inst0(11, 8), 0.U(1.W))
+  val uImm0 = Cat(Fill(32, inst0(31)), inst0(31, 12), 0.U(12.W))
+  val jImm0 = Cat(Fill(44, inst0(31)), inst0(19, 12), inst0(20), inst0(30, 21), 0.U(1.W))
 
   val useImm0 = isIType0 || isSType0 || isBType0 || isUType0 || isJType0
   val imm0    = Mux(isKeshavIsa0, funct70.asUInt, Mux(isSType0, sImm0, Mux(isBType0, bImm0, Mux(isUType0, uImm0, Mux(isJType0, jImm0, iImm0)))))
 
-  val iImm1 = Cat(Fill(20, inst1(31)), inst1(31, 20))
-  val sImm1 = Cat(Fill(20, inst1(31)), inst1(31, 25), inst1(11, 7))
-  val bImm1 = Cat(Fill(20, inst1(31)), inst1(7), inst1(30, 25), inst1(11, 8), 0.U(1.W))
-  val uImm1 = Cat(inst1(31, 12), 0.U(12.W))
-  val jImm1 = Cat(Fill(12, inst1(31)), inst1(19, 12), inst1(20), inst1(30, 21), 0.U(1.W))
+  val iImm1 = Cat(Fill(52, inst1(31)), inst1(31, 20))
+  val sImm1 = Cat(Fill(52, inst1(31)), inst1(31, 25), inst1(11, 7))
+  val bImm1 = Cat(Fill(52, inst1(31)), inst1(7), inst1(30, 25), inst1(11, 8), 0.U(1.W))
+  val uImm1 = Cat(Fill(32, inst1(31)), inst1(31, 12), 0.U(12.W))
+  val jImm1 = Cat(Fill(44, inst1(31)), inst1(19, 12), inst1(20), inst1(30, 21), 0.U(1.W))
 
   val useImm1 = isIType1 || isSType1 || isBType1 || isUType1 || isJType1
   val imm1    = Mux(isKeshavIsa1, funct71.asUInt, Mux(isSType1, sImm1, Mux(isBType1, bImm1, Mux(isUType1, uImm1, Mux(isJType1, jImm1, iImm1)))))
@@ -125,6 +118,20 @@ class AGU extends Module {
       is("b000".U) { aluOp0 := ALUOp.SADD }
       is("b001".U) { aluOp0 := ALUOp.MIN }
       is("b010".U) { aluOp0 := ALUOp.MAX }
+    }
+  }.elsewhen(isRTypeW0) {
+    when(funct70 === "b0000001".U) {
+      switch(funct30) {
+        is("b000".U) { aluOp0 := ALUOp.MULW }
+        is("b100".U) { aluOp0 := ALUOp.DIVW }
+        is("b110".U) { aluOp0 := ALUOp.REMW }
+      }
+    }.otherwise {
+      switch(funct30) {
+        is("b000".U) { aluOp0 := Mux(funct70(5), ALUOp.SUBW, ALUOp.ADDW) }
+        is("b001".U) { aluOp0 := ALUOp.SLLW }
+        is("b101".U) { aluOp0 := Mux(funct70(5), ALUOp.SRAW, ALUOp.SRLW) }
+      }
     }
   }.elsewhen(isMType0) {
     switch(funct30) {
@@ -155,6 +162,20 @@ class AGU extends Module {
       is("b001".U) { aluOp1 := ALUOp.MIN }
       is("b010".U) { aluOp1 := ALUOp.MAX }
     }
+  }.elsewhen(isRTypeW1) {
+    when(funct71 === "b0000001".U) {
+      switch(funct31) {
+        is("b000".U) { aluOp1 := ALUOp.MULW }
+        is("b100".U) { aluOp1 := ALUOp.DIVW }
+        is("b110".U) { aluOp1 := ALUOp.REMW }
+      }
+    }.otherwise {
+      switch(funct31) {
+        is("b000".U) { aluOp1 := Mux(funct71(5), ALUOp.SUBW, ALUOp.ADDW) }
+        is("b001".U) { aluOp1 := ALUOp.SLLW }
+        is("b101".U) { aluOp1 := Mux(funct71(5), ALUOp.SRAW, ALUOp.SRLW) }
+      }
+    }
   }.elsewhen(isMType1) {
     switch(funct31) {
       is("b000".U) { aluOp1 := ALUOp.MUL }
@@ -177,7 +198,7 @@ class AGU extends Module {
     aluOp1 := ALUOp.LUI
   }
 
-  btb.io.fetchPC := pc
+  btb.io.fetchPC := pc(31, 0)
 
   val cmd0 = Wire(new ExecuteCommand)
   cmd0.pc              := pc
@@ -199,7 +220,7 @@ class AGU extends Module {
   cmd0.isJalr          := isJalr0
   cmd0.isFence         := isFence0
   cmd0.predictedTaken  := btb.io.predictTaken
-  cmd0.predictedTarget := btb.io.predictTarget
+  cmd0.predictedTarget := Cat(Fill(32, btb.io.predictTarget(31)), btb.io.predictTarget)
 
   val cmd1 = Wire(new ExecuteCommand)
   cmd1.pc              := pc + 4.U
@@ -262,7 +283,7 @@ class AGU extends Module {
   }.elsewhen(stall) {
     pcNext := pc
   }.elsewhen(isBType0 && btb.io.predictTaken) {
-    pcNext := btb.io.predictTarget
+    pcNext := Cat(Fill(32, btb.io.predictTarget(31)), btb.io.predictTarget)
   }.elsewhen(isJType0) {
     pcNext := pc + jImm0
   }.elsewhen(canDualIssue && io.out0.ready && io.out1.ready) {

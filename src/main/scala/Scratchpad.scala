@@ -4,24 +4,24 @@ import chisel3._
 import chisel3.util._
 
 /**
-  * Scratchpad SRAM Memory Array (16KB Dual-Port SRAM with 1-Cycle Latency)
+  * Scratchpad SRAM Memory Array (16KB Dual-Port SRAM with 1-Cycle Latency & 64-Bit Transfers)
   * 
   * Features:
   * - 64-Bit Instruction Fetch Bus (imemData64) delivering 2 instructions per cycle.
-  * - 32-Bit Data Memory Interface supporting Byte (SB), Halfword (SH), and Word (SW) accesses.
+  * - 64-Bit Data Memory Interface supporting Byte (SB), Halfword (SH), Word (SW), Doubleword (SD), LD, LWU.
   * - Latched MMIO UART output register (0x80000000) for clean hardware verification.
   */
 class Scratchpad(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) extends Module {
   val io = IO(new Bundle {
     // 64-bit Dual-Instruction Memory Read Port (2 instructions per cycle)
-    val imemAddr   = Input(UInt(32.W))
+    val imemAddr   = Input(UInt(64.W))
     val imemData64 = Output(UInt(64.W))
 
-    // 32-bit Data Memory Read / Write Port
-    val dmemAddr        = Input(UInt(32.W))
-    val dmemReadData    = Output(UInt(32.W))
+    // 64-bit Data Memory Read / Write Port
+    val dmemAddr        = Input(UInt(64.W))
+    val dmemReadData    = Output(UInt(64.W))
     val dmemWriteEnable = Input(Bool())
-    val dmemWriteData   = Input(UInt(32.W))
+    val dmemWriteData   = Input(UInt(64.W))
     val dmemFunct3      = Input(UInt(3.W))
 
     // Hardware MMIO Console Output
@@ -52,40 +52,47 @@ class Scratchpad(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) ex
   // 2. Data Memory Access
   val isMMIO       = io.dmemAddr >= "h8000_0000".U
   val dmemWordAddr = io.dmemAddr >> 2.U
-  val rawWordRead  = mem(dmemWordAddr)
+  val rawWordRead0 = mem(dmemWordAddr)
+  val rawWordRead1 = mem(dmemWordAddr + 1.U)
 
   // Sub-Word Read Sign/Zero Extension
   val byteOffset = io.dmemAddr(1, 0)
   val halfOffset = io.dmemAddr(1)
 
-  val readDataReg = WireDefault(0.U(32.W))
+  val readDataReg = WireDefault(0.U(64.W))
   switch(io.dmemFunct3) {
     is("b000".U) { // LB
-      val byteVal = (rawWordRead >> (byteOffset * 8.U))(7, 0)
-      readDataReg := Cat(Fill(24, byteVal(7)), byteVal)
+      val byteVal = (rawWordRead0 >> (byteOffset * 8.U))(7, 0)
+      readDataReg := Cat(Fill(56, byteVal(7)), byteVal)
     }
     is("b001".U) { // LH
-      val halfVal = (rawWordRead >> (halfOffset * 16.U))(15, 0)
-      readDataReg := Cat(Fill(16, halfVal(15)), halfVal)
+      val halfVal = (rawWordRead0 >> (halfOffset * 16.U))(15, 0)
+      readDataReg := Cat(Fill(48, halfVal(15)), halfVal)
     }
     is("b010".U) { // LW
-      readDataReg := rawWordRead
+      readDataReg := Cat(Fill(32, rawWordRead0(31)), rawWordRead0)
+    }
+    is("b011".U) { // LD (64-Bit Doubleword)
+      readDataReg := Cat(rawWordRead1, rawWordRead0)
     }
     is("b100".U) { // LBU
-      val byteVal = (rawWordRead >> (byteOffset * 8.U))(7, 0)
-      readDataReg := Cat(0.U(24.W), byteVal)
+      val byteVal = (rawWordRead0 >> (byteOffset * 8.U))(7, 0)
+      readDataReg := Cat(0.U(56.W), byteVal)
     }
     is("b101".U) { // LHU
-      val halfVal = (rawWordRead >> (halfOffset * 16.U))(15, 0)
-      readDataReg := Cat(0.U(16.W), halfVal)
+      val halfVal = (rawWordRead0 >> (halfOffset * 16.U))(15, 0)
+      readDataReg := Cat(0.U(48.W), halfVal)
+    }
+    is("b110".U) { // LWU
+      readDataReg := Cat(0.U(32.W), rawWordRead0)
     }
   }
   io.dmemReadData := readDataReg
 
-  // Sub-Word / Word Write Operations
+  // Sub-Word / Word / Doubleword Write Operations
   when(io.dmemWriteEnable && !isMMIO) {
     val currentWord = mem(dmemWordAddr)
-    val writeWord   = WireDefault(io.dmemWriteData)
+    val writeWord   = WireDefault(io.dmemWriteData(31, 0))
 
     switch(io.dmemFunct3) {
       is("b000".U) { // SB: Store Byte
@@ -95,6 +102,7 @@ class Scratchpad(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) ex
           is("b10".U) { writeWord := Cat(currentWord(31, 24), io.dmemWriteData(7, 0), currentWord(15, 0)) }
           is("b11".U) { writeWord := Cat(io.dmemWriteData(7, 0), currentWord(23, 0)) }
         }
+        mem.write(dmemWordAddr, writeWord)
       }
       is("b001".U) { // SH: Store Halfword
         when(!halfOffset) {
@@ -102,12 +110,17 @@ class Scratchpad(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) ex
         }.otherwise {
           writeWord := Cat(io.dmemWriteData(15, 0), currentWord(15, 0))
         }
+        mem.write(dmemWordAddr, writeWord)
       }
       is("b010".U) { // SW: Store Word
-        writeWord := io.dmemWriteData
+        writeWord := io.dmemWriteData(31, 0)
+        mem.write(dmemWordAddr, writeWord)
+      }
+      is("b011".U) { // SD: Store Doubleword (64-Bit)
+        mem.write(dmemWordAddr, io.dmemWriteData(31, 0))
+        mem.write(dmemWordAddr + 1.U, io.dmemWriteData(63, 32))
       }
     }
-    mem.write(dmemWordAddr, writeWord)
   }
 
   // MMIO Console Latch Register

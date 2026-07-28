@@ -4,19 +4,19 @@ import chisel3._
 import chisel3.util._
 
 /**
-  * Compute Unit (Parallel Dual-ALU Super-Scalar Engine with Banked Register File & Keshav-ISA Hardware Units)
+  * Compute Unit (Parallel Dual-ALU Super-Scalar Engine with 64-Bit Banked Register File & Keshav-ISA Extensions)
   */
 class ComputeUnit extends Module {
   val io = IO(new Bundle {
     val in0 = Flipped(Decoupled(new ExecuteCommand))
     val in1 = Flipped(Decoupled(new ExecuteCommand))
 
-    val registerFile = Output(Vec(32, UInt(32.W)))
+    val registerFile = Output(Vec(32, UInt(64.W)))
 
-    val dmemAddr        = Output(UInt(32.W))
-    val dmemReadData    = Input(UInt(32.W))
+    val dmemAddr        = Output(UInt(64.W))
+    val dmemReadData    = Input(UInt(64.W))
     val dmemWriteEnable = Output(Bool())
-    val dmemWriteData   = Output(UInt(32.W))
+    val dmemWriteData   = Output(UInt(64.W))
     val dmemFunct3      = Output(UInt(3.W))
 
     val fenceStall = Output(Bool())
@@ -24,18 +24,18 @@ class ComputeUnit extends Module {
     val trapHalt   = Output(Bool())
 
     val branchRedirect  = Output(Bool())
-    val branchTarget    = Output(UInt(32.W))
+    val branchTarget    = Output(UInt(64.W))
     val btbUpdateValid  = Output(Bool())
-    val btbUpdatePC     = Output(UInt(32.W))
-    val btbUpdateTarget = Output(UInt(32.W))
+    val btbUpdatePC     = Output(UInt(64.W))
+    val btbUpdateTarget = Output(UInt(64.W))
     val btbUpdateTaken  = Output(Bool())
   })
 
-  // Banked Register File
-  val evenRegs = RegInit(VecInit(Seq.fill(16)(0.U(32.W))))
-  val oddRegs  = RegInit(VecInit(Seq.fill(16)(0.U(32.W))))
+  // 64-Bit Banked Register File (Even / Odd Banks)
+  val evenRegs = RegInit(VecInit(Seq.fill(16)(0.U(64.W))))
+  val oddRegs  = RegInit(VecInit(Seq.fill(16)(0.U(64.W))))
 
-  val fullRegFile = Wire(Vec(32, UInt(32.W)))
+  val fullRegFile = Wire(Vec(32, UInt(64.W)))
   for (i <- 0 until 32) {
     if (i == 0) {
       fullRegFile(0) := 0.U
@@ -50,7 +50,7 @@ class ComputeUnit extends Module {
   def readReg(regIndex: UInt): UInt = {
     val bankIdx = regIndex(4, 1)
     val isOdd   = regIndex(0)
-    Mux(regIndex === 0.U, 0.U(32.W), Mux(isOdd, oddRegs(bankIdx), evenRegs(bankIdx)))
+    Mux(regIndex === 0.U, 0.U(64.W), Mux(isOdd, oddRegs(bankIdx), evenRegs(bankIdx)))
   }
 
   val scoreboard = Module(new Scoreboard)
@@ -58,8 +58,8 @@ class ComputeUnit extends Module {
   val fast0DeqFire = WireDefault(false.B)
   val fast0CmdWire = Wire(new ExecuteCommand)
 
-  val fast0Rs1ValWire  = WireDefault(0.U(32.W))
-  val fast0Rs2ValWire  = WireDefault(0.U(32.W))
+  val fast0Rs1ValWire  = WireDefault(0.U(64.W))
+  val fast0Rs2ValWire  = WireDefault(0.U(64.W))
   val branchTakenWire0 = WireDefault(false.B)
 
   when(fast0CmdWire.isBranch) {
@@ -142,11 +142,11 @@ class ComputeUnit extends Module {
 
   val wb0Valid = WireDefault(false.B)
   val wb0Rd    = WireDefault(0.U(5.W))
-  val wb0Data  = WireDefault(0.U(32.W))
+  val wb0Data  = WireDefault(0.U(64.W))
 
   val wb1Valid = WireDefault(false.B)
   val wb1Rd    = WireDefault(0.U(5.W))
-  val wb1Data  = WireDefault(0.U(32.W))
+  val wb1Data  = WireDefault(0.U(64.W))
 
   io.wbValid := wb0Valid || wb1Valid
 
@@ -190,9 +190,9 @@ class ComputeUnit extends Module {
   fast0Rs1ValWire := getBypassVal(fast0CmdWire.rs1)
   fast0Rs2ValWire := getBypassVal(fast0CmdWire.rs2)
   val fast0OpB    = Mux(fast0CmdWire.useImm, fast0CmdWire.imm, fast0Rs2ValWire)
-  val fast0Shamt  = fast0OpB(4, 0)
+  val fast0Shamt  = fast0OpB(5, 0)
 
-  val fast0AluResult = WireDefault(0.U(32.W))
+  val fast0AluResult = WireDefault(0.U(64.W))
   switch(fast0CmdWire.aluOp) {
     is(ALUOp.ADD)  { fast0AluResult := fast0Rs1ValWire + fast0OpB }
     is(ALUOp.SUB)  { fast0AluResult := fast0Rs1ValWire - fast0OpB }
@@ -210,6 +210,27 @@ class ComputeUnit extends Module {
     is(ALUOp.SADD) { fast0AluResult := fast0Rs1ValWire + fast0Rs2ValWire }
     is(ALUOp.MIN)  { fast0AluResult := Mux(fast0Rs1ValWire.asSInt < fast0Rs2ValWire.asSInt, fast0Rs1ValWire, fast0Rs2ValWire) }
     is(ALUOp.MAX)  { fast0AluResult := Mux(fast0Rs1ValWire.asSInt > fast0Rs2ValWire.asSInt, fast0Rs1ValWire, fast0Rs2ValWire) }
+    // RV64 Word Operations with explicit 32-bit sign extension
+    is(ALUOp.ADDW) {
+      val res32 = (fast0Rs1ValWire(31, 0) + fast0OpB(31, 0))(31, 0)
+      fast0AluResult := Cat(Fill(32, res32(31)), res32)
+    }
+    is(ALUOp.SUBW) {
+      val res32 = (fast0Rs1ValWire(31, 0) - fast0OpB(31, 0))(31, 0)
+      fast0AluResult := Cat(Fill(32, res32(31)), res32)
+    }
+    is(ALUOp.SLLW) {
+      val res32 = (fast0Rs1ValWire(31, 0) << fast0Shamt(4, 0))(31, 0)
+      fast0AluResult := Cat(Fill(32, res32(31)), res32)
+    }
+    is(ALUOp.SRLW) {
+      val res32 = (fast0Rs1ValWire(31, 0) >> fast0Shamt(4, 0))(31, 0)
+      fast0AluResult := Cat(Fill(32, res32(31)), res32)
+    }
+    is(ALUOp.SRAW) {
+      val res32 = (fast0Rs1ValWire(31, 0).asSInt >> fast0Shamt(4, 0)).asUInt(31, 0)
+      fast0AluResult := Cat(Fill(32, res32(31)), res32)
+    }
   }
 
   io.btbUpdateValid  := fastQueue0.io.deq.fire && fast0CmdWire.isBranch
@@ -223,9 +244,9 @@ class ComputeUnit extends Module {
   val fast1Rs1ValWire = getBypassVal(fast1CmdWire.rs1)
   val fast1Rs2ValWire = getBypassVal(fast1CmdWire.rs2)
   val fast1OpB       = Mux(fast1CmdWire.useImm, fast1CmdWire.imm, fast1Rs2ValWire)
-  val fast1Shamt     = fast1OpB(4, 0)
+  val fast1Shamt     = fast1OpB(5, 0)
 
-  val fast1AluResult = WireDefault(0.U(32.W))
+  val fast1AluResult = WireDefault(0.U(64.W))
   switch(fast1CmdWire.aluOp) {
     is(ALUOp.ADD)  { fast1AluResult := fast1Rs1ValWire + fast1OpB }
     is(ALUOp.SUB)  { fast1AluResult := fast1Rs1ValWire - fast1OpB }
@@ -243,6 +264,27 @@ class ComputeUnit extends Module {
     is(ALUOp.SADD) { fast1AluResult := fast1Rs1ValWire + fast1Rs2ValWire }
     is(ALUOp.MIN)  { fast1AluResult := Mux(fast1Rs1ValWire.asSInt < fast1Rs2ValWire.asSInt, fast1Rs1ValWire, fast1Rs2ValWire) }
     is(ALUOp.MAX)  { fast1AluResult := Mux(fast1Rs1ValWire.asSInt > fast1Rs2ValWire.asSInt, fast1Rs1ValWire, fast1Rs2ValWire) }
+    // RV64 Word Operations with explicit 32-bit sign extension
+    is(ALUOp.ADDW) {
+      val res32 = (fast1Rs1ValWire(31, 0) + fast1OpB(31, 0))(31, 0)
+      fast1AluResult := Cat(Fill(32, res32(31)), res32)
+    }
+    is(ALUOp.SUBW) {
+      val res32 = (fast1Rs1ValWire(31, 0) - fast1OpB(31, 0))(31, 0)
+      fast1AluResult := Cat(Fill(32, res32(31)), res32)
+    }
+    is(ALUOp.SLLW) {
+      val res32 = (fast1Rs1ValWire(31, 0) << fast1Shamt(4, 0))(31, 0)
+      fast1AluResult := Cat(Fill(32, res32(31)), res32)
+    }
+    is(ALUOp.SRLW) {
+      val res32 = (fast1Rs1ValWire(31, 0) >> fast1Shamt(4, 0))(31, 0)
+      fast1AluResult := Cat(Fill(32, res32(31)), res32)
+    }
+    is(ALUOp.SRAW) {
+      val res32 = (fast1Rs1ValWire(31, 0).asSInt >> fast1Shamt(4, 0)).asUInt(31, 0)
+      fast1AluResult := Cat(Fill(32, res32(31)), res32)
+    }
   }
 
   val fast1FinalResult = Mux(fast1CmdWire.isJump, fast1CmdWire.pc + 4.U, fast1AluResult)

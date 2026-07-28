@@ -4,9 +4,9 @@ import chisel3._
 import chisel3.util._
 
 /**
-  * LightningRV Top-Level SoC Module
+  * LightningRV Top-Level SoC Module (64-Bit Keshav-ISA Enabled)
   * 
-  * Integrates Dual-Issue AGU with 16-entry 2-bit BTB, ComputeUnit with Banked Register File & Parallel
+  * Integrates Dual-Issue AGU with 16-entry 2-bit BTB, ComputeUnit with 64-Bit Banked Register File & Parallel
   * Dual-ALU Execution Engine, and 16KB Scratchpad SRAM Memory Array over a 64-bit instruction fetch bus.
   */
 class LightningRV(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) extends Module {
@@ -14,7 +14,7 @@ class LightningRV(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) e
     val trapHalt      = Output(Bool())
     val cycleCount    = Output(UInt(32.W))
     val instCount     = Output(UInt(32.W))
-    val registerFile  = Output(Vec(32, UInt(32.W)))
+    val registerFile  = Output(Vec(32, UInt(64.W)))
     val mmioCharValid = Output(Bool())
     val mmioChar      = Output(UInt(8.W))
   })
