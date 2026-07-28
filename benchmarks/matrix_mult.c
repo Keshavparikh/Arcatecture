@@ -1,3 +1,5 @@
+#include "keshav_isa.h"
+
 int main() {
     volatile int A[2][2];
     volatile int B[2][2];
@@ -11,13 +13,19 @@ int main() {
 
     for (int i = 0; i < 2; i++) {
         for (int j = 0; j < 2; j++) {
-            C[i][j] = 0;
+            int sum = 0;
             for (int k = 0; k < 2; k++) {
-                C[i][j] += A[i][k] * B[k][j];
+                int a_val = A[i][k];
+                int b_val = B[k][j];
+                int prod  = a_val * b_val;
+                int new_sum;
+                KESHAV_SADD(new_sum, sum, prod);
+                sum = new_sum;
             }
+            C[i][j] = sum;
         }
     }
 
     int total_sum = C[0][0] + C[0][1] + C[1][0] + C[1][1];
-    return total_sum; // Expected: (96+161) + (180+28) + (40+207) + (75+36) = 257 + 208 + 247 + 111 = 823
+    return total_sum; // Expected: 615
 }

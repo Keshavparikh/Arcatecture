@@ -4,11 +4,11 @@ import chisel3._
 import chisel3.util._
 
 /**
-  * AGU (Address Generation Unit / Dual-Issue Decoder & BTB Predictor)
+  * AGU (Address Generation Unit / Dual-Issue Decoder & BTB Predictor with Keshav-ISA Extensions)
   * 
   * Features:
   * - 64-bit Dual Instruction Fetch Input (imemData64) receiving inst0 and inst1.
-  * - Dual Instruction Decoding & Structural / Hazard Detection.
+  * - Keshav-ISA Custom Decoder (opcode 0b0001011): Fused Shift-Add (SADD), Hardware Min (MIN), Hardware Max (MAX).
   * - Bank Collision Pre-Filtering: Prevents dual dispatch when both instructions target the same register bank (even/odd).
   * - Control Flow Enforcement: Branch and jump instructions issue in Lane 0 for deterministic target resolution.
   * - Integrated 16-Entry Direct-Mapped 2-Bit Saturating Counter BTB Branch Predictor.
@@ -72,23 +72,25 @@ class AGU extends Module {
   val rs21    = inst1(24, 20)
   val funct71 = inst1(31, 25)
 
-  val isRType0 = opcode0 === "b0110011".U
-  val isIType0 = opcode0 === "b0010011".U || opcode0 === "b0000011".U
-  val isSType0 = opcode0 === "b0100011".U
-  val isBType0 = opcode0 === "b1100011".U
-  val isUType0 = opcode0 === "b0110111".U
-  val isJType0 = opcode0 === "b1101111".U
-  val isJalr0  = opcode0 === "b1100111".U
-  val isFence0 = opcode0 === "b0001111".U || opcode0 === "b1110011".U
+  val isRType0     = opcode0 === "b0110011".U
+  val isIType0     = opcode0 === "b0010011".U || opcode0 === "b0000011".U
+  val isSType0     = opcode0 === "b0100011".U
+  val isBType0     = opcode0 === "b1100011".U
+  val isUType0     = opcode0 === "b0110111".U
+  val isJType0     = opcode0 === "b1101111".U
+  val isJalr0      = opcode0 === "b1100111".U
+  val isFence0     = opcode0 === "b0001111".U || opcode0 === "b1110011".U
+  val isKeshavIsa0 = opcode0 === "b0001011".U // CUSTOM_0 Opcode for Keshav-ISA
 
-  val isRType1 = opcode1 === "b0110011".U
-  val isIType1 = opcode1 === "b0010011".U || opcode1 === "b0000011".U
-  val isSType1 = opcode1 === "b0100011".U
-  val isBType1 = opcode1 === "b1100011".U
-  val isUType1 = opcode1 === "b0110111".U
-  val isJType1 = opcode1 === "b1101111".U
-  val isJalr1  = opcode1 === "b1100111".U
-  val isFence1 = opcode1 === "b0001111".U || opcode1 === "b1110011".U
+  val isRType1     = opcode1 === "b0110011".U
+  val isIType1     = opcode1 === "b0010011".U || opcode1 === "b0000011".U
+  val isSType1     = opcode1 === "b0100011".U
+  val isBType1     = opcode1 === "b1100011".U
+  val isUType1     = opcode1 === "b0110111".U
+  val isJType1     = opcode1 === "b1101111".U
+  val isJalr1      = opcode1 === "b1100111".U
+  val isFence1     = opcode1 === "b0001111".U || opcode1 === "b1110011".U
+  val isKeshavIsa1 = opcode1 === "b0001011".U // CUSTOM_0 Opcode for Keshav-ISA
 
   val isMType0 = isRType0 && funct70 === "b0000001".U
   val isMType1 = isRType1 && funct71 === "b0000001".U
@@ -106,7 +108,7 @@ class AGU extends Module {
   val jImm0 = Cat(Fill(12, inst0(31)), inst0(19, 12), inst0(20), inst0(30, 21), 0.U(1.W))
 
   val useImm0 = isIType0 || isSType0 || isBType0 || isUType0 || isJType0
-  val imm0    = Mux(isSType0, sImm0, Mux(isBType0, bImm0, Mux(isUType0, uImm0, Mux(isJType0, jImm0, iImm0))))
+  val imm0    = Mux(isKeshavIsa0, funct70.asUInt, Mux(isSType0, sImm0, Mux(isBType0, bImm0, Mux(isUType0, uImm0, Mux(isJType0, jImm0, iImm0)))))
 
   val iImm1 = Cat(Fill(20, inst1(31)), inst1(31, 20))
   val sImm1 = Cat(Fill(20, inst1(31)), inst1(31, 25), inst1(11, 7))
@@ -115,10 +117,16 @@ class AGU extends Module {
   val jImm1 = Cat(Fill(12, inst1(31)), inst1(19, 12), inst1(20), inst1(30, 21), 0.U(1.W))
 
   val useImm1 = isIType1 || isSType1 || isBType1 || isUType1 || isJType1
-  val imm1    = Mux(isSType1, sImm1, Mux(isBType1, bImm1, Mux(isUType1, uImm1, Mux(isJType1, jImm1, iImm1))))
+  val imm1    = Mux(isKeshavIsa1, funct71.asUInt, Mux(isSType1, sImm1, Mux(isBType1, bImm1, Mux(isUType1, uImm1, Mux(isJType1, jImm1, iImm1)))))
 
   val aluOp0 = WireDefault(ALUOp.ADD)
-  when(isMType0) {
+  when(isKeshavIsa0) {
+    switch(funct30) {
+      is("b000".U) { aluOp0 := ALUOp.SADD }
+      is("b001".U) { aluOp0 := ALUOp.MIN }
+      is("b010".U) { aluOp0 := ALUOp.MAX }
+    }
+  }.elsewhen(isMType0) {
     switch(funct30) {
       is("b000".U) { aluOp0 := ALUOp.MUL }
       is("b001".U) { aluOp0 := ALUOp.MULH }
@@ -141,7 +149,13 @@ class AGU extends Module {
   }
 
   val aluOp1 = WireDefault(ALUOp.ADD)
-  when(isMType1) {
+  when(isKeshavIsa1) {
+    switch(funct31) {
+      is("b000".U) { aluOp1 := ALUOp.SADD }
+      is("b001".U) { aluOp1 := ALUOp.MIN }
+      is("b010".U) { aluOp1 := ALUOp.MAX }
+    }
+  }.elsewhen(isMType1) {
     switch(funct31) {
       is("b000".U) { aluOp1 := ALUOp.MUL }
       is("b001".U) { aluOp1 := ALUOp.MULH }

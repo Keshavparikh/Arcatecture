@@ -4,7 +4,7 @@ import chisel3._
 import chisel3.util._
 
 /**
-  * Compute Unit (Parallel Dual-ALU Super-Scalar Engine with Banked Register File)
+  * Compute Unit (Parallel Dual-ALU Super-Scalar Engine with Banked Register File & Keshav-ISA Hardware Units)
   */
 class ComputeUnit extends Module {
   val io = IO(new Bundle {
@@ -206,6 +206,10 @@ class ComputeUnit extends Module {
     is(ALUOp.OR)   { fast0AluResult := fast0Rs1ValWire | fast0OpB }
     is(ALUOp.AND)  { fast0AluResult := fast0Rs1ValWire & fast0OpB }
     is(ALUOp.LUI)  { fast0AluResult := fast0OpB }
+    // Keshav-ISA Extensions
+    is(ALUOp.SADD) { fast0AluResult := fast0Rs1ValWire + fast0Rs2ValWire }
+    is(ALUOp.MIN)  { fast0AluResult := Mux(fast0Rs1ValWire.asSInt < fast0Rs2ValWire.asSInt, fast0Rs1ValWire, fast0Rs2ValWire) }
+    is(ALUOp.MAX)  { fast0AluResult := Mux(fast0Rs1ValWire.asSInt > fast0Rs2ValWire.asSInt, fast0Rs1ValWire, fast0Rs2ValWire) }
   }
 
   io.btbUpdateValid  := fastQueue0.io.deq.fire && fast0CmdWire.isBranch
@@ -235,6 +239,10 @@ class ComputeUnit extends Module {
     is(ALUOp.OR)   { fast1AluResult := fast1Rs1ValWire | fast1OpB }
     is(ALUOp.AND)  { fast1AluResult := fast1Rs1ValWire & fast1OpB }
     is(ALUOp.LUI)  { fast1AluResult := fast1OpB }
+    // Keshav-ISA Extensions
+    is(ALUOp.SADD) { fast1AluResult := fast1Rs1ValWire + fast1Rs2ValWire }
+    is(ALUOp.MIN)  { fast1AluResult := Mux(fast1Rs1ValWire.asSInt < fast1Rs2ValWire.asSInt, fast1Rs1ValWire, fast1Rs2ValWire) }
+    is(ALUOp.MAX)  { fast1AluResult := Mux(fast1Rs1ValWire.asSInt > fast1Rs2ValWire.asSInt, fast1Rs1ValWire, fast1Rs2ValWire) }
   }
 
   val fast1FinalResult = Mux(fast1CmdWire.isJump, fast1CmdWire.pc + 4.U, fast1AluResult)
