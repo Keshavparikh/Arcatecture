@@ -4,11 +4,12 @@ import chisel3._
 import chisel3.util._
 
 /**
-  * Scratchpad SRAM Memory Array (16KB Dual-Port SRAM with 1-Cycle Latency & 64-Bit Transfers)
+  * Scratchpad SRAM Memory Array (16KB Dual-Port SRAM with 256-Bit Vector SIMD Interface)
   * 
   * Features:
   * - 64-Bit Instruction Fetch Bus (imemData64) delivering 2 instructions per cycle.
-  * - 64-Bit Data Memory Interface supporting Byte (SB), Halfword (SH), Word (SW), Doubleword (SD), LD, LWU.
+  * - 64-Bit Scalar Data Memory Interface supporting Byte (SB), Halfword (SH), Word (SW), Doubleword (SD).
+  * - 256-Bit Vector Bulk Memory Interface (VLE32.v / VSE32.v) delivering 8 elements per cycle.
   * - Latched MMIO UART output register (0x80000000) for clean hardware verification.
   */
 class Scratchpad(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) extends Module {
@@ -17,12 +18,17 @@ class Scratchpad(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) ex
     val imemAddr   = Input(UInt(64.W))
     val imemData64 = Output(UInt(64.W))
 
-    // 64-bit Data Memory Read / Write Port
+    // 64-bit Scalar Data Memory Read / Write Port
     val dmemAddr        = Input(UInt(64.W))
     val dmemReadData    = Output(UInt(64.W))
     val dmemWriteEnable = Input(Bool())
     val dmemWriteData   = Input(UInt(64.W))
     val dmemFunct3      = Input(UInt(3.W))
+
+    // 256-bit Vector Data Memory Read / Write Port (8 x 32-bit elements)
+    val dmemReadData256    = Output(UInt(256.W))
+    val dmemWriteData256   = Input(UInt(256.W))
+    val dmemIsVectorWrite  = Input(Bool())
 
     // Hardware MMIO Console Output
     val mmioCharValid = Output(Bool())
@@ -89,36 +95,50 @@ class Scratchpad(memorySizeWords: Int = 4096, initWords: Seq[BigInt] = Seq()) ex
   }
   io.dmemReadData := readDataReg
 
-  // Sub-Word / Word / Doubleword Write Operations
-  when(io.dmemWriteEnable && !isMMIO) {
-    val currentWord = mem(dmemWordAddr)
-    val writeWord   = WireDefault(io.dmemWriteData(31, 0))
+  // 256-Bit Vector Memory Read (Reads 8 consecutive 32-bit words)
+  val vecWordsRead = Wire(Vec(8, UInt(32.W)))
+  for (i <- 0 until 8) {
+    vecWordsRead(i) := mem(dmemWordAddr + i.U)
+  }
+  io.dmemReadData256 := Cat(vecWordsRead.reverse)
 
-    switch(io.dmemFunct3) {
-      is("b000".U) { // SB: Store Byte
-        switch(byteOffset) {
-          is("b00".U) { writeWord := Cat(currentWord(31, 8), io.dmemWriteData(7, 0)) }
-          is("b01".U) { writeWord := Cat(currentWord(31, 16), io.dmemWriteData(7, 0), currentWord(7, 0)) }
-          is("b10".U) { writeWord := Cat(currentWord(31, 24), io.dmemWriteData(7, 0), currentWord(15, 0)) }
-          is("b11".U) { writeWord := Cat(io.dmemWriteData(7, 0), currentWord(23, 0)) }
+  // Sub-Word / Word / Doubleword / Vector Write Operations
+  when(io.dmemWriteEnable && !isMMIO) {
+    when(io.dmemIsVectorWrite) {
+      // 256-Bit Bulk Vector Store (VSE32.v)
+      for (i <- 0 until 8) {
+        mem.write(dmemWordAddr + i.U, io.dmemWriteData256(i * 32 + 31, i * 32))
+      }
+    }.otherwise {
+      val currentWord = mem(dmemWordAddr)
+      val writeWord   = WireDefault(io.dmemWriteData(31, 0))
+
+      switch(io.dmemFunct3) {
+        is("b000".U) { // SB: Store Byte
+          switch(byteOffset) {
+            is("b00".U) { writeWord := Cat(currentWord(31, 8), io.dmemWriteData(7, 0)) }
+            is("b01".U) { writeWord := Cat(currentWord(31, 16), io.dmemWriteData(7, 0), currentWord(7, 0)) }
+            is("b10".U) { writeWord := Cat(currentWord(31, 24), io.dmemWriteData(7, 0), currentWord(15, 0)) }
+            is("b11".U) { writeWord := Cat(io.dmemWriteData(7, 0), currentWord(23, 0)) }
+          }
+          mem.write(dmemWordAddr, writeWord)
         }
-        mem.write(dmemWordAddr, writeWord)
-      }
-      is("b001".U) { // SH: Store Halfword
-        when(!halfOffset) {
-          writeWord := Cat(currentWord(31, 16), io.dmemWriteData(15, 0))
-        }.otherwise {
-          writeWord := Cat(io.dmemWriteData(15, 0), currentWord(15, 0))
+        is("b001".U) { // SH: Store Halfword
+          when(!halfOffset) {
+            writeWord := Cat(currentWord(31, 16), io.dmemWriteData(15, 0))
+          }.otherwise {
+            writeWord := Cat(io.dmemWriteData(15, 0), currentWord(15, 0))
+          }
+          mem.write(dmemWordAddr, writeWord)
         }
-        mem.write(dmemWordAddr, writeWord)
-      }
-      is("b010".U) { // SW: Store Word
-        writeWord := io.dmemWriteData(31, 0)
-        mem.write(dmemWordAddr, writeWord)
-      }
-      is("b011".U) { // SD: Store Doubleword (64-Bit)
-        mem.write(dmemWordAddr, io.dmemWriteData(31, 0))
-        mem.write(dmemWordAddr + 1.U, io.dmemWriteData(63, 32))
+        is("b010".U) { // SW: Store Word
+          writeWord := io.dmemWriteData(31, 0)
+          mem.write(dmemWordAddr, writeWord)
+        }
+        is("b011".U) { // SD: Store Doubleword (64-Bit)
+          mem.write(dmemWordAddr, io.dmemWriteData(31, 0))
+          mem.write(dmemWordAddr + 1.U, io.dmemWriteData(63, 32))
+        }
       }
     }
   }

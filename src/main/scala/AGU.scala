@@ -4,7 +4,7 @@ import chisel3._
 import chisel3.util._
 
 /**
-  * AGU (Address Generation Unit / Dual-Issue Decoder & BTB Predictor with 64-Bit RV64IM & Keshav-ISA Extensions)
+  * AGU (Address Generation Unit / Dual-Issue Decoder & BTB Predictor with 64-Bit RV64IM, Keshav-ISA & 8-Wide SIMD RV64V Vector Extensions)
   */
 class AGU extends Module {
   val io = IO(new Bundle {
@@ -55,6 +55,7 @@ class AGU extends Module {
   val rs10    = inst0(19, 15)
   val rs20    = inst0(24, 20)
   val funct70 = inst0(31, 25)
+  val funct60 = inst0(31, 26)
 
   val opcode1 = inst1(6, 0)
   val rd1     = inst1(11, 7)
@@ -62,6 +63,7 @@ class AGU extends Module {
   val rs11    = inst1(19, 15)
   val rs21    = inst1(24, 20)
   val funct71 = inst1(31, 25)
+  val funct61 = inst1(31, 26)
 
   val isRType0     = opcode0 === "b0110011".U
   val isRTypeW0    = opcode0 === "b0111011".U // RV64 Word Operations
@@ -74,6 +76,11 @@ class AGU extends Module {
   val isFence0     = opcode0 === "b0001111".U || opcode0 === "b1110011".U
   val isKeshavIsa0 = opcode0 === "b0001011".U // CUSTOM_0 Opcode for Keshav-ISA
 
+  val isVectorOp0    = opcode0 === "b1010111".U // OP_VECTOR (0x57)
+  val isVectorLoad0  = opcode0 === "b0000111".U // LOAD_FP / VLE32 (0x07)
+  val isVectorStore0 = opcode0 === "b0100111".U // STORE_FP / VSE32 (0x27)
+  val isVectorLane0  = isVectorOp0 || isVectorLoad0 || isVectorStore0
+
   val isRType1     = opcode1 === "b0110011".U
   val isRTypeW1    = opcode1 === "b0111011".U
   val isIType1     = opcode1 === "b0010011".U || opcode1 === "b0000011".U || opcode1 === "b0011011".U
@@ -85,14 +92,19 @@ class AGU extends Module {
   val isFence1     = opcode1 === "b0001111".U || opcode1 === "b1110011".U
   val isKeshavIsa1 = opcode1 === "b0001011".U
 
+  val isVectorOp1    = opcode1 === "b1010111".U
+  val isVectorLoad1  = opcode1 === "b0000111".U
+  val isVectorStore1 = opcode1 === "b0100111".U
+  val isVectorLane1  = isVectorOp1 || isVectorLoad1 || isVectorStore1
+
   val isMType0 = (isRType0 || isRTypeW0) && funct70 === "b0000001".U
   val isMType1 = (isRType1 || isRTypeW1) && funct71 === "b0000001".U
 
   val isMemLane0 = opcode0 === "b0000011".U || opcode0 === "b0100011".U
   val isMemLane1 = opcode1 === "b0000011".U || opcode1 === "b0100011".U
 
-  val isFastLane0 = !isMType0 && !isMemLane0
-  val isFastLane1 = !isMType1 && !isMemLane1
+  val isFastLane0 = !isMType0 && !isMemLane0 && !isVectorLane0
+  val isFastLane1 = !isMType1 && !isMemLane1 && !isVectorLane1
 
   val iImm0 = Cat(Fill(52, inst0(31)), inst0(31, 20))
   val sImm0 = Cat(Fill(52, inst0(31)), inst0(31, 25), inst0(11, 7))
@@ -113,7 +125,19 @@ class AGU extends Module {
   val imm1    = Mux(isKeshavIsa1, funct71.asUInt, Mux(isSType1, sImm1, Mux(isBType1, bImm1, Mux(isUType1, uImm1, Mux(isJType1, jImm1, iImm1)))))
 
   val aluOp0 = WireDefault(ALUOp.ADD)
-  when(isKeshavIsa0) {
+  when(isVectorLoad0) {
+    aluOp0 := ALUOp.VLE32
+  }.elsewhen(isVectorStore0) {
+    aluOp0 := ALUOp.VSE32
+  }.elsewhen(isVectorOp0) {
+    switch(funct60) {
+      is("b000000".U) { aluOp0 := ALUOp.VADD }
+      is("b000010".U) { aluOp0 := ALUOp.VSUB }
+      is("b100101".U) { aluOp0 := ALUOp.VMUL }
+      is("b000100".U) { aluOp0 := ALUOp.VMIN }
+      is("b000101".U) { aluOp0 := ALUOp.VMAX }
+    }
+  }.elsewhen(isKeshavIsa0) {
     switch(funct30) {
       is("b000".U) { aluOp0 := ALUOp.SADD }
       is("b001".U) { aluOp0 := ALUOp.MIN }
@@ -156,7 +180,19 @@ class AGU extends Module {
   }
 
   val aluOp1 = WireDefault(ALUOp.ADD)
-  when(isKeshavIsa1) {
+  when(isVectorLoad1) {
+    aluOp1 := ALUOp.VLE32
+  }.elsewhen(isVectorStore1) {
+    aluOp1 := ALUOp.VSE32
+  }.elsewhen(isVectorOp1) {
+    switch(funct61) {
+      is("b000000".U) { aluOp1 := ALUOp.VADD }
+      is("b000010".U) { aluOp1 := ALUOp.VSUB }
+      is("b100101".U) { aluOp1 := ALUOp.VMUL }
+      is("b000100".U) { aluOp1 := ALUOp.VMIN }
+      is("b000101".U) { aluOp1 := ALUOp.VMAX }
+    }
+  }.elsewhen(isKeshavIsa1) {
     switch(funct31) {
       is("b000".U) { aluOp1 := ALUOp.SADD }
       is("b001".U) { aluOp1 := ALUOp.MIN }
@@ -213,8 +249,11 @@ class AGU extends Module {
   cmd0.isSlowLane      := isMType0
   cmd0.isFastLane      := isFastLane0
   cmd0.isMemLane       := isMemLane0
+  cmd0.isVectorLane    := isVectorLane0
   cmd0.isLoad          := opcode0 === "b0000011".U
   cmd0.isStore         := opcode0 === "b0100011".U
+  cmd0.isVectorLoad    := isVectorLoad0
+  cmd0.isVectorStore   := isVectorStore0
   cmd0.isBranch        := isBType0
   cmd0.isJump          := isJType0 || isJalr0
   cmd0.isJalr          := isJalr0
@@ -235,8 +274,11 @@ class AGU extends Module {
   cmd1.isSlowLane      := isMType1
   cmd1.isFastLane      := isFastLane1
   cmd1.isMemLane       := isMemLane1
+  cmd1.isVectorLane    := isVectorLane1
   cmd1.isLoad          := opcode1 === "b0000011".U
   cmd1.isStore         := opcode1 === "b0100011".U
+  cmd1.isVectorLoad    := isVectorLoad1
+  cmd1.isVectorStore   := isVectorStore1
   cmd1.isBranch        := isBType1
   cmd1.isJump          := isJType1 || isJalr1
   cmd1.isJalr          := isJalr1
@@ -251,11 +293,12 @@ class AGU extends Module {
 
   val isWarHazardBetweenDualInsts = rd1 =/= 0.U && (rs10 === rd1 || rs20 === rd1)
 
-  // Structural Bank Write Collision: Both instructions writing to the same register bank (even/odd)
-  val isBankCollision = rd0 =/= 0.U && rd1 =/= 0.U && (rd0(0) === rd1(0))
+  // Structural Bank Write Collision: Both instructions writing to the same scalar register bank (even/odd)
+  val isBankCollision = !isVectorLane0 && !isVectorLane1 && rd0 =/= 0.U && rd1 =/= 0.U && (rd0(0) === rd1(0))
 
   val isSameQueueHazard = (isMType0 && isMType1) ||
-                          (isMemLane0 && isMemLane1)
+                          (isMemLane0 && isMemLane1) ||
+                          (isVectorLane0 && isVectorLane1)
 
   // Control Flow Enforcement: Branch and jump instructions issue in Lane 0
   val isControlFlowInDualInsts = isBType0 || isJType0 || isJalr0 || isFence0 ||

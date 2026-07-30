@@ -14,8 +14,8 @@ class CBenchmarkTest extends AnyFlatSpec with ChiselScalatestTester with Matcher
       dut.clock.setTimeout(0)
       var cyclesElapsed = 0
       while (!dut.io.trapHalt.peek().litToBoolean && cyclesElapsed < 2000) {
-        dut.clock.step(50)
-        cyclesElapsed += 50
+        dut.clock.step(10)
+        cyclesElapsed += 10
       }
       val cycles = dut.io.cycleCount.peek().litValue.toDouble
       val insts  = dut.io.instCount.peek().litValue.toDouble
@@ -41,8 +41,8 @@ class CBenchmarkTest extends AnyFlatSpec with ChiselScalatestTester with Matcher
       dut.clock.setTimeout(0)
       var cyclesElapsed = 0
       while (!dut.io.trapHalt.peek().litToBoolean && cyclesElapsed < 2000) {
-        dut.clock.step(50)
-        cyclesElapsed += 50
+        dut.clock.step(10)
+        cyclesElapsed += 10
       }
       val cycles = dut.io.cycleCount.peek().litValue.toDouble
       val insts  = dut.io.instCount.peek().litValue.toDouble
@@ -68,8 +68,8 @@ class CBenchmarkTest extends AnyFlatSpec with ChiselScalatestTester with Matcher
       dut.clock.setTimeout(0)
       var cyclesElapsed = 0
       while (!dut.io.trapHalt.peek().litToBoolean && cyclesElapsed < 2000) {
-        dut.clock.step(50)
-        cyclesElapsed += 50
+        dut.clock.step(10)
+        cyclesElapsed += 10
       }
       val cycles = dut.io.cycleCount.peek().litValue.toDouble
       val insts  = dut.io.instCount.peek().litValue.toDouble

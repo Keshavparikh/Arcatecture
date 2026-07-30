@@ -3,7 +3,7 @@ package lightningrv
 import chisel3._
 
 /**
-  * Decoded Instruction Command Bundle for Pipeline Decoupled Queues (Keshav-ISA 64-Bit Enabled)
+  * Decoded Instruction Command Bundle for Pipeline Decoupled Queues (64-Bit + 256-Bit Vector Enabled)
   */
 class ExecuteCommand extends Bundle {
   val pc              = UInt(64.W)
@@ -18,8 +18,11 @@ class ExecuteCommand extends Bundle {
   val isSlowLane      = Bool()
   val isFastLane      = Bool()
   val isMemLane       = Bool()
+  val isVectorLane    = Bool()
   val isLoad          = Bool()
   val isStore         = Bool()
+  val isVectorLoad    = Bool()
+  val isVectorStore   = Bool()
   val isBranch        = Bool()
   val isJump          = Bool()
   val isJalr          = Bool()
@@ -45,7 +48,7 @@ object ALUOp {
   val MULH  = 13.U(6.W)
   val DIV   = 14.U(6.W)
   val REM   = 15.U(6.W)
-  // Keshav-ISA Extensions
+  // Keshav-ISA Scalar Extensions
   val SADD  = 16.U(6.W)
   val MIN   = 17.U(6.W)
   val MAX   = 18.U(6.W)
@@ -58,4 +61,12 @@ object ALUOp {
   val MULW  = 24.U(6.W)
   val DIVW  = 25.U(6.W)
   val REMW  = 26.U(6.W)
+  // Keshav-ISA 8-Wide SIMD Vector Operations (RV64V)
+  val VADD  = 27.U(6.W)
+  val VSUB  = 28.U(6.W)
+  val VMUL  = 29.U(6.W)
+  val VMIN  = 30.U(6.W)
+  val VMAX  = 31.U(6.W)
+  val VLE32 = 32.U(6.W)
+  val VSE32 = 33.U(6.W)
 }

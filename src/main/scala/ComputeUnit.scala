@@ -4,7 +4,7 @@ import chisel3._
 import chisel3.util._
 
 /**
-  * Compute Unit (Parallel Dual-ALU Super-Scalar Engine with 64-Bit Banked Register File & Keshav-ISA Extensions)
+  * Compute Unit (Parallel Dual-ALU Super-Scalar Engine with 64-Bit Banked Scalar Register File & 256-Bit SIMD Vector Engine)
   */
 class ComputeUnit extends Module {
   val io = IO(new Bundle {
@@ -19,6 +19,11 @@ class ComputeUnit extends Module {
     val dmemWriteData   = Output(UInt(64.W))
     val dmemFunct3      = Output(UInt(3.W))
 
+    // 256-Bit Vector Memory Interface
+    val dmemReadData256   = Input(UInt(256.W))
+    val dmemWriteData256  = Output(UInt(256.W))
+    val dmemIsVectorWrite = Output(Bool())
+
     val fenceStall = Output(Bool())
     val wbValid    = Output(Bool())
     val trapHalt   = Output(Bool())
@@ -31,7 +36,7 @@ class ComputeUnit extends Module {
     val btbUpdateTaken  = Output(Bool())
   })
 
-  // 64-Bit Banked Register File (Even / Odd Banks)
+  // 64-Bit Banked Scalar Register File (Even / Odd Banks)
   val evenRegs = RegInit(VecInit(Seq.fill(16)(0.U(64.W))))
   val oddRegs  = RegInit(VecInit(Seq.fill(16)(0.U(64.W))))
 
@@ -52,6 +57,10 @@ class ComputeUnit extends Module {
     val isOdd   = regIndex(0)
     Mux(regIndex === 0.U, 0.U(64.W), Mux(isOdd, oddRegs(bankIdx), evenRegs(bankIdx)))
   }
+
+  // 256-Bit Vector Register File & 8-Lane SIMD Vector ALU
+  val vrf = Module(new VectorRegisterFile)
+  val valu = Module(new VectorALU)
 
   val scoreboard = Module(new Scoreboard)
 
@@ -86,15 +95,17 @@ class ComputeUnit extends Module {
 
   val flush = io.branchRedirect
 
-  val fastQueue0 = Module(new Queue(new ExecuteCommand, entries = 8, pipe = true, flow = true))
-  val fastQueue1 = Module(new Queue(new ExecuteCommand, entries = 8, pipe = true, flow = true))
-  val slowQueue  = Module(new Queue(new ExecuteCommand, entries = 8, pipe = true, flow = true))
-  val memQueue   = Module(new Queue(new ExecuteCommand, entries = 8, pipe = true, flow = true))
+  val fastQueue0  = Module(new Queue(new ExecuteCommand, entries = 8, pipe = true, flow = true))
+  val fastQueue1  = Module(new Queue(new ExecuteCommand, entries = 8, pipe = true, flow = true))
+  val slowQueue   = Module(new Queue(new ExecuteCommand, entries = 8, pipe = true, flow = true))
+  val memQueue    = Module(new Queue(new ExecuteCommand, entries = 8, pipe = true, flow = true))
+  val vectorQueue = Module(new Queue(new ExecuteCommand, entries = 8, pipe = true, flow = true))
 
-  fastQueue0.reset := reset.asBool || flush
-  fastQueue1.reset := reset.asBool || flush
-  slowQueue.reset  := reset.asBool || flush
-  memQueue.reset   := reset.asBool || flush
+  fastQueue0.reset  := reset.asBool || flush
+  fastQueue1.reset  := reset.asBool || flush
+  slowQueue.reset   := reset.asBool || flush
+  memQueue.reset    := reset.asBool || flush
+  vectorQueue.reset := reset.asBool || flush
 
   val cmd0In = io.in0.bits
   val cmd1In = io.in1.bits
@@ -109,15 +120,17 @@ class ComputeUnit extends Module {
                         (cmd1In.rs2 =/= 0.U && busyVec(cmd1In.rs2)) ||
                         (cmd1In.rd  =/= 0.U && busyVec(cmd1In.rd))
 
-  val enq0Fast = io.in0.valid && cmd0In.isFastLane && !hazard0Detected
-  val enq0Slow = io.in0.valid && cmd0In.isSlowLane && !hazard0Detected
-  val enq0Mem  = io.in0.valid && cmd0In.isMemLane  && !hazard0Detected
+  val enq0Fast   = io.in0.valid && cmd0In.isFastLane   && !hazard0Detected
+  val enq0Slow   = io.in0.valid && cmd0In.isSlowLane   && !hazard0Detected
+  val enq0Mem    = io.in0.valid && cmd0In.isMemLane    && !hazard0Detected
+  val enq0Vector = io.in0.valid && cmd0In.isVectorLane && !hazard0Detected
 
-  val enq1Fast = io.in1.valid && cmd1In.isFastLane && !hazard1Detected
-  val enq1Slow = io.in1.valid && cmd1In.isSlowLane && !hazard1Detected
-  val enq1Mem  = io.in1.valid && cmd1In.isMemLane  && !hazard1Detected
+  val enq1Fast   = io.in1.valid && cmd1In.isFastLane   && !hazard1Detected
+  val enq1Slow   = io.in1.valid && cmd1In.isSlowLane   && !hazard1Detected
+  val enq1Mem    = io.in1.valid && cmd1In.isMemLane    && !hazard1Detected
+  val enq1Vector = io.in1.valid && cmd1In.isVectorLane && !hazard1Detected
 
-  fastQueue0.io.enq.valid := enq0Fast || (!enq0Slow && !enq0Mem && enq1Fast)
+  fastQueue0.io.enq.valid := enq0Fast || (!enq0Slow && !enq0Mem && !enq0Vector && enq1Fast)
   fastQueue0.io.enq.bits  := Mux(enq0Fast, cmd0In, cmd1In)
 
   fastQueue1.io.enq.valid := enq0Fast && enq1Fast
@@ -129,13 +142,18 @@ class ComputeUnit extends Module {
   memQueue.io.enq.valid  := enq0Mem || enq1Mem
   memQueue.io.enq.bits   := Mux(enq0Mem, cmd0In, cmd1In)
 
-  io.in0.ready := Mux(cmd0In.isSlowLane, slowQueue.io.enq.ready,
-                  Mux(cmd0In.isMemLane,  memQueue.io.enq.ready,
-                                        fastQueue0.io.enq.ready)) && !hazard0Detected
+  vectorQueue.io.enq.valid := enq0Vector || enq1Vector
+  vectorQueue.io.enq.bits  := Mux(enq0Vector, cmd0In, cmd1In)
 
-  io.in1.ready := Mux(cmd1In.isSlowLane, slowQueue.io.enq.ready,
-                  Mux(cmd1In.isMemLane,  memQueue.io.enq.ready,
-                                        Mux(enq0Fast, fastQueue1.io.enq.ready, fastQueue0.io.enq.ready))) && !hazard1Detected && io.in0.ready
+  io.in0.ready := Mux(cmd0In.isSlowLane,   slowQueue.io.enq.ready,
+                  Mux(cmd0In.isMemLane,    memQueue.io.enq.ready,
+                  Mux(cmd0In.isVectorLane, vectorQueue.io.enq.ready,
+                                          fastQueue0.io.enq.ready))) && !hazard0Detected
+
+  io.in1.ready := Mux(cmd1In.isSlowLane,   slowQueue.io.enq.ready,
+                  Mux(cmd1In.isMemLane,    memQueue.io.enq.ready,
+                  Mux(cmd1In.isVectorLane, vectorQueue.io.enq.ready,
+                                          Mux(enq0Fast, fastQueue1.io.enq.ready, fastQueue0.io.enq.ready)))) && !hazard1Detected && io.in0.ready
 
   scoreboard.io.reserveValid := slowQueue.io.enq.fire
   scoreboard.io.reserveRd    := slowQueue.io.enq.bits.rd
@@ -174,7 +192,7 @@ class ComputeUnit extends Module {
   scoreboard.io.clearRd    := slowMath.io.out.bits.rd
 
   val isSlowMathBusy    = slowMath.io.stateBusy || slowMath.io.out.valid
-  val isOtherQueuesBusy = slowQueue.io.count > 0.U || memQueue.io.count > 0.U || scoreboard.io.isAnyBusy || isSlowMathBusy
+  val isOtherQueuesBusy = slowQueue.io.count > 0.U || memQueue.io.count > 0.U || vectorQueue.io.count > 0.U || scoreboard.io.isAnyBusy || isSlowMathBusy
   val isAnyQueueBusy   = fastQueue0.io.count > 0.U || fastQueue1.io.count > 0.U || isOtherQueuesBusy
   io.fenceStall        := isAnyQueueBusy
 
@@ -206,11 +224,9 @@ class ComputeUnit extends Module {
     is(ALUOp.OR)   { fast0AluResult := fast0Rs1ValWire | fast0OpB }
     is(ALUOp.AND)  { fast0AluResult := fast0Rs1ValWire & fast0OpB }
     is(ALUOp.LUI)  { fast0AluResult := fast0OpB }
-    // Keshav-ISA Extensions
     is(ALUOp.SADD) { fast0AluResult := fast0Rs1ValWire + fast0Rs2ValWire }
     is(ALUOp.MIN)  { fast0AluResult := Mux(fast0Rs1ValWire.asSInt < fast0Rs2ValWire.asSInt, fast0Rs1ValWire, fast0Rs2ValWire) }
     is(ALUOp.MAX)  { fast0AluResult := Mux(fast0Rs1ValWire.asSInt > fast0Rs2ValWire.asSInt, fast0Rs1ValWire, fast0Rs2ValWire) }
-    // RV64 Word Operations with explicit 32-bit sign extension
     is(ALUOp.ADDW) {
       val res32 = (fast0Rs1ValWire(31, 0) + fast0OpB(31, 0))(31, 0)
       fast0AluResult := Cat(Fill(32, res32(31)), res32)
@@ -260,11 +276,9 @@ class ComputeUnit extends Module {
     is(ALUOp.OR)   { fast1AluResult := fast1Rs1ValWire | fast1OpB }
     is(ALUOp.AND)  { fast1AluResult := fast1Rs1ValWire & fast1OpB }
     is(ALUOp.LUI)  { fast1AluResult := fast1OpB }
-    // Keshav-ISA Extensions
     is(ALUOp.SADD) { fast1AluResult := fast1Rs1ValWire + fast1Rs2ValWire }
     is(ALUOp.MIN)  { fast1AluResult := Mux(fast1Rs1ValWire.asSInt < fast1Rs2ValWire.asSInt, fast1Rs1ValWire, fast1Rs2ValWire) }
     is(ALUOp.MAX)  { fast1AluResult := Mux(fast1Rs1ValWire.asSInt > fast1Rs2ValWire.asSInt, fast1Rs1ValWire, fast1Rs2ValWire) }
-    // RV64 Word Operations with explicit 32-bit sign extension
     is(ALUOp.ADDW) {
       val res32 = (fast1Rs1ValWire(31, 0) + fast1OpB(31, 0))(31, 0)
       fast1AluResult := Cat(Fill(32, res32(31)), res32)
@@ -289,15 +303,34 @@ class ComputeUnit extends Module {
 
   val fast1FinalResult = Mux(fast1CmdWire.isJump, fast1CmdWire.pc + 4.U, fast1AluResult)
 
+  // Vector Engine Execution Handshake
+  val vecCmd = vectorQueue.io.deq.bits
+  vrf.io.vs1 := vecCmd.rs1
+  vrf.io.vs2 := vecCmd.rs2
+  valu.io.vs1Data := vrf.io.vs1Data
+  valu.io.vs2Data := vrf.io.vs2Data
+  valu.io.v0Mask  := vrf.io.v0Mask
+  valu.io.masked  := false.B
+  valu.io.op      := vecCmd.aluOp
+
+  val vecBaseAddr = getBypassVal(vecCmd.rs1)
+
+  io.dmemWriteData256  := vrf.io.vs2Data
+  io.dmemIsVectorWrite := vectorQueue.io.deq.valid && vecCmd.isVectorStore
+
+  vrf.io.vd          := vecCmd.rd
+  vrf.io.writeData   := Mux(vecCmd.isVectorLoad, io.dmemReadData256, valu.io.vdResult)
+  vrf.io.writeEnable := vectorQueue.io.deq.valid && (vecCmd.isVectorLoad || (!vecCmd.isVectorStore && vecCmd.isVectorLane))
+
   val memCmd    = memQueue.io.deq.bits
   val memRs1Val = getBypassVal(memCmd.rs1)
   val memRs2Val = getBypassVal(memCmd.rs2)
 
   val memLoadState = RegInit(false.B)
 
-  io.dmemAddr        := memRs1Val + memCmd.imm
+  io.dmemAddr        := Mux(vectorQueue.io.deq.valid && (vecCmd.isVectorLoad || vecCmd.isVectorStore), vecBaseAddr, memRs1Val + memCmd.imm)
   io.dmemWriteData   := memRs2Val
-  io.dmemWriteEnable := memQueue.io.deq.valid && memCmd.isStore
+  io.dmemWriteEnable := (memQueue.io.deq.valid && memCmd.isStore) || (vectorQueue.io.deq.valid && vecCmd.isVectorStore)
   io.dmemFunct3      := memCmd.funct3
 
   slowMath.io.out.ready := true.B
@@ -306,40 +339,53 @@ class ComputeUnit extends Module {
     wb0Valid := true.B
     wb0Rd    := slowMath.io.out.bits.rd
     wb0Data  := slowMath.io.out.bits.result
-    fastQueue0.io.deq.ready := false.B
-    fastQueue1.io.deq.ready := false.B
-    memQueue.io.deq.ready   := false.B
+    fastQueue0.io.deq.ready  := false.B
+    fastQueue1.io.deq.ready  := false.B
+    memQueue.io.deq.ready    := false.B
+    vectorQueue.io.deq.ready := false.B
+  }.elsewhen(vectorQueue.io.deq.valid) {
+    wb0Valid := true.B
+    wb0Rd    := 0.U
+    wb0Data  := 0.U
+    fastQueue0.io.deq.ready  := false.B
+    fastQueue1.io.deq.ready  := false.B
+    memQueue.io.deq.ready    := false.B
+    vectorQueue.io.deq.ready := true.B
   }.elsewhen(memQueue.io.deq.valid && memCmd.isLoad) {
     when(!memLoadState) {
       wb0Valid := false.B
       memLoadState := true.B
-      fastQueue0.io.deq.ready := false.B
-      fastQueue1.io.deq.ready := false.B
-      memQueue.io.deq.ready   := false.B
+      fastQueue0.io.deq.ready  := false.B
+      fastQueue1.io.deq.ready  := false.B
+      memQueue.io.deq.ready    := false.B
+      vectorQueue.io.deq.ready := false.B
     }.otherwise {
       wb0Valid := true.B
       wb0Rd    := memCmd.rd
       wb0Data  := io.dmemReadData
       memLoadState := false.B
-      fastQueue0.io.deq.ready := false.B
-      fastQueue1.io.deq.ready := false.B
-      memQueue.io.deq.ready   := true.B
+      fastQueue0.io.deq.ready  := false.B
+      fastQueue1.io.deq.ready  := false.B
+      memQueue.io.deq.ready    := true.B
+      vectorQueue.io.deq.ready := false.B
     }
   }.elsewhen(memQueue.io.deq.valid && memCmd.isStore) {
     wb0Valid := true.B
     wb0Rd    := 0.U
     wb0Data  := 0.U
-    fastQueue0.io.deq.ready := false.B
-    fastQueue1.io.deq.ready := false.B
-    memQueue.io.deq.ready   := true.B
+    fastQueue0.io.deq.ready  := false.B
+    fastQueue1.io.deq.ready  := false.B
+    memQueue.io.deq.ready    := true.B
+    vectorQueue.io.deq.ready := false.B
   }.elsewhen(fastQueue0.io.deq.valid || fastQueue1.io.deq.valid) {
     val isFenceDeq = fast0CmdWire.isFence && fastQueue0.io.deq.valid
     when(isFenceDeq && !canFenceDequeue) {
-      fastQueue0.io.deq.ready := false.B
-      fastQueue1.io.deq.ready := false.B
-      memQueue.io.deq.ready   := false.B
-      wb0Valid                := false.B
-      wb1Valid                := false.B
+      fastQueue0.io.deq.ready  := false.B
+      fastQueue1.io.deq.ready  := false.B
+      memQueue.io.deq.ready    := false.B
+      vectorQueue.io.deq.ready := false.B
+      wb0Valid                 := false.B
+      wb1Valid                 := false.B
     }.otherwise {
       when(fastQueue0.io.deq.valid) {
         fast0DeqFire            := true.B
@@ -362,14 +408,16 @@ class ComputeUnit extends Module {
         fastQueue1.io.deq.ready := false.B
       }
 
-      memQueue.io.deq.ready   := false.B
+      memQueue.io.deq.ready    := false.B
+      vectorQueue.io.deq.ready := false.B
     }
   }.otherwise {
     wb0Valid := false.B
     wb1Valid := false.B
-    fastQueue0.io.deq.ready := false.B
-    fastQueue1.io.deq.ready := false.B
-    memQueue.io.deq.ready   := false.B
+    fastQueue0.io.deq.ready  := false.B
+    fastQueue1.io.deq.ready  := false.B
+    memQueue.io.deq.ready    := false.B
+    vectorQueue.io.deq.ready := false.B
   }
 
   when(flush) {
